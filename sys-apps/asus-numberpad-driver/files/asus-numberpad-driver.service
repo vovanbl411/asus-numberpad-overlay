@@ -1,0 +1,9 @@
+[Unit]
+Description=ASUS NumberPad driver
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/asus-numberpad-driver/service.conf
+ExecStart=/usr/bin/asus-numberpad-driver ${NUMBERPAD_LAYOUT} ${NUMBERPAD_CONFIG_DIR}
+KillSignal=SIGINT
+TimeoutStopSec=10

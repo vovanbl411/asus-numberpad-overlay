@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+import os
+import runpy
+import sys
+
+sys.path.insert(0, '/usr/share/asus-numberpad-driver')
+os.chdir('/usr/share/asus-numberpad-driver')
+runpy.run_path('/usr/share/asus-numberpad-driver/numberpad.py', run_name='__main__')
