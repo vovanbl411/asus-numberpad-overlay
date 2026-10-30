@@ -1,0 +1,42 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+      - name: Check whitespace
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          base="${BASE:-$BEFORE}"
+          if [ -n "$base" ] && ! printf '%s' "$base" | grep -q '^0\{40\}$'; then
+            git diff --check "$base" "$GITHUB_SHA"
+          else
+            git show --format= --check "$GITHUB_SHA"
+          fi
+  pkgcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan both packages in Gentoo
+        run: |
+          set -eu
+          docker create --name portage gentoo/portage@sha256:ce69e5b771bfe9404731e846b835346c34f2c82817ac3626f13af198689a1961 /bin/true
+          trap 'docker rm -f portage >/dev/null' EXIT
+          docker run --rm --volumes-from portage --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/overlay" --workdir /overlay gentoo/stage3@sha256:d8536e52677e3efe4caf048ca588bc685bc2d24d7fdfc882de1cdc6d38c81d96 /bin/bash -ec '
+            mkdir -p /etc/portage/repos.conf
+            printf "[DEFAULT]\nmain-repo = gentoo\n[gentoo]\nlocation = /var/db/repos/gentoo\n[asus-numberpad-overlay]\nlocation = /overlay\n" > /etc/portage/repos.conf/ci-overlay.conf
+            emerge --oneshot dev-util/pkgcheck
+            pkgcheck scan --exit=error,warning sys-apps/asus-numberpad-driver dev-python/python-periphery
+          '

@@ -55,3 +55,33 @@ sudo emerge --ask --depclean sys-apps/asus-numberpad-driver
 ```
 
 Review the depclean selection. Remove the user configuration and any device access rules separately if no longer needed.
+
+## Packaged versions
+
+<!-- numberpad-versions:start -->
+| Package | Current | Fallback |
+| --- | --- | --- |
+| sys-apps/asus-numberpad-driver | 7.3.0 | — |
+<!-- numberpad-versions:end -->
+
+## Release automation
+
+CI checks both packages. The watcher runs daily at 06:17 UTC; its manual
+`workflow_dispatch` also offers a dry run. Both inspect stable upstream releases. An update is prepared in an isolated Gentoo container and,
+if validation succeeds, published as a draft pull request for manual review.
+The current ebuild and shutdown patch remain as fallback; the previous
+fallback is removed when a third version is prepared. `python-periphery` is
+updated manually. CI runs for a pull request created with `GITHUB_TOKEN`
+require approval in GitHub before they start. A leftover automation branch without an open pull request
+must be reviewed and removed manually before another update can be prepared.
+
+The watcher compares upstream license, requirements, installer and Nix files,
+common packaging manifests, and imports in `numberpad.py` against the current
+release. Changes stop automation for manual packaging review. These checks
+cannot detect every dependency, license, installation or behavioral change,
+including dynamic imports, changes in other Python files, and installation
+instructions in upstream README files. The comparison resolves the current
+version tag at run time and does not detect an earlier move of that tag. Portage prepare
+checks whether the existing patch applies, and Python compilation checks
+syntax; neither proves the patch still works correctly. Review upstream changes,
+packaging and the patch, and test on actual hardware before merging the draft.

@@ -1,0 +1,138 @@
+name: Prepare numberpad release
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report the release plan without changing anything
+        type: boolean
+        default: false
+permissions: {}
+concurrency:
+  group: numberpad-release
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      ready: ${{ steps.ready.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Test automation
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+      - name: Discover release
+        id: watch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          if [ "$DRY_RUN" = true ]; then
+            python3 scripts/release.py watch --dry-run
+          else
+            python3 scripts/release.py watch
+          fi
+      - name: Prepare isolated workspace
+        if: steps.watch.outputs.update == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.watch.outputs.tag }}
+        run: |
+          mkdir "$RUNNER_TEMP/overlay"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/overlay"
+          python3 scripts/release.py prepare --root "$RUNNER_TEMP/overlay" --tag "$RELEASE_TAG"
+      - name: Validate candidate in Gentoo
+        if: steps.watch.outputs.update == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.watch.outputs.tag }}
+        run: |
+          set -eu
+          docker create --name portage gentoo/portage@sha256:ce69e5b771bfe9404731e846b835346c34f2c82817ac3626f13af198689a1961 /bin/true
+          trap 'docker rm -f portage >/dev/null' EXIT
+          test ! -e "$RUNNER_TEMP/overlay/metadata/md5-cache"
+          mkdir "$RUNNER_TEMP/overlay/metadata/md5-cache"
+          docker run --rm --volumes-from portage --mount "type=bind,src=$RUNNER_TEMP/overlay,dst=/overlay" --mount type=tmpfs,dst=/overlay/metadata/md5-cache --workdir /overlay --env RELEASE_TAG --env OWNER_UID="$(id -u)" --env OWNER_GID="$(id -g)" gentoo/stage3@sha256:d8536e52677e3efe4caf048ca588bc685bc2d24d7fdfc882de1cdc6d38c81d96 /bin/bash -ec '
+            mkdir -p /etc/portage/repos.conf
+            printf "[DEFAULT]\nmain-repo = gentoo\n[gentoo]\nlocation = /var/db/repos/gentoo\n[asus-numberpad-overlay]\nlocation = /overlay\n" > /etc/portage/repos.conf/ci-overlay.conf
+            ebuild "/overlay/sys-apps/asus-numberpad-driver/asus-numberpad-driver-${RELEASE_TAG#v}.ebuild" manifest
+            ebuild "/overlay/sys-apps/asus-numberpad-driver/asus-numberpad-driver-${RELEASE_TAG#v}.ebuild" clean prepare
+            python3 -c "import pathlib; p=list(pathlib.Path(\"/var/tmp/portage/sys-apps\").glob(\"asus-numberpad-driver-*/work/*/numberpad.py\")); assert len(p)==1, p; compile(p[0].read_bytes(), str(p[0]), \"exec\")"
+            emerge --oneshot dev-util/pkgcheck
+            pkgcheck scan --exit=error,warning sys-apps/asus-numberpad-driver dev-python/python-periphery
+            chown "$OWNER_UID:$OWNER_GID" /overlay/sys-apps/asus-numberpad-driver/Manifest
+          '
+          rmdir "$RUNNER_TEMP/overlay/metadata/md5-cache"
+      - name: Verify candidate files and upstream tag
+        if: steps.watch.outputs.update == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.watch.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.watch.outputs.commit }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/release.py verify-workspace --candidate "$RUNNER_TEMP/overlay" --tag "$RELEASE_TAG"
+          python3 -c 'import os,sys; sys.path.insert(0,"scripts"); from release import GitHub; assert GitHub(os.environ["GH_TOKEN"]).commit(os.environ["RELEASE_TAG"]) == os.environ["RELEASE_COMMIT"], "Upstream tag moved"'
+      - name: Create minimal handoff
+        if: steps.watch.outputs.update == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.watch.outputs.tag }}
+          RELEASE_COMMIT: ${{ steps.watch.outputs.commit }}
+        run: |
+          mkdir "$RUNNER_TEMP/handoff"
+          cp "$RUNNER_TEMP/overlay/sys-apps/asus-numberpad-driver/Manifest" "$RUNNER_TEMP/handoff/Manifest"
+          python3 -c 'import json,os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"handoff","metadata.json").write_text(json.dumps({"tag":os.environ["RELEASE_TAG"],"commit":os.environ["RELEASE_COMMIT"],"base":__import__("subprocess").check_output(["git","rev-parse","HEAD"],text=True).strip()}))'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.watch.outputs.update == 'true'
+        with:
+          name: numberpad-handoff
+          path: ${{ runner.temp }}/handoff
+          if-no-files-found: error
+          retention-days: 1
+      - id: ready
+        if: steps.watch.outputs.update == 'true'
+        run: echo 'ready=true' >> "$GITHUB_OUTPUT"
+  publish:
+    needs: prepare
+    if: needs.prepare.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: numberpad-handoff
+          path: ${{ runner.temp }}/handoff
+      - name: Recheck release and handoff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release.py recheck --handoff "$RUNNER_TEMP/handoff"
+      - id: apply
+        run: python3 scripts/release.py apply --root "$GITHUB_WORKSPACE" --handoff "$RUNNER_TEMP/handoff"
+      - name: Verify and publish draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.apply.outputs.branch }}
+          RELEASE_TAG: ${{ steps.apply.outputs.tag }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -eu
+          python3 scripts/release.py verify --tag "$RELEASE_TAG"
+          git diff --check
+          test "$(git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" ls-remote origin "refs/heads/$BASE" | cut -f1)" = "$(git rev-parse HEAD)"
+          git switch -c "$BRANCH"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md sys-apps/asus-numberpad-driver
+          git diff --cached --check
+          git commit -m "update: numberpad $RELEASE_TAG"
+          git -c "http.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)" push origin "HEAD:refs/heads/$BRANCH"
+          gh pr create --draft --base "$BASE" --head "$BRANCH" --title "[release-bump] numberpad $RELEASE_TAG" --body 'Review upstream changes, packaging, patch and hardware behavior before merging.'
